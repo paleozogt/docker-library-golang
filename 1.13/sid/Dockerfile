@@ -1,4 +1,10 @@
-FROM buildpack-deps:buster-scm
+ARG ARCH
+FROM paleozogt/arch-map as archmap
+FROM buildpack-deps:buster-scm as builder
+ARG ARCH
+
+# arch map
+COPY --from=archmap /bin/arch-map /bin/
 
 # gcc for cgo
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -6,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 		gcc \
 		libc6-dev \
 		make \
+		patch \
 		pkg-config \
 	&& rm -rf /var/lib/apt/lists/*
 
@@ -13,17 +20,14 @@ ENV PATH /usr/local/go/bin:$PATH
 
 ENV GOLANG_VERSION 1.13.15
 
-RUN set -eux; \
+ADD *.patch /
+
+RUN . /bin/arch-map; \
+	set -eux; \
 	\
 # this "case" statement is generated via "update.sh"
 	dpkgArch="$(dpkg --print-architecture)"; \
 	case "${dpkgArch##*-}" in \
-		amd64) goRelArch='linux-amd64'; goRelSha256='01cc3ddf6273900eba3e2bf311238828b7168b822bb57a9ccab4d7aa2acd6028' ;; \
-		armhf) goRelArch='linux-armv6l'; goRelSha256='c58eacae1745769e77328aec08e0e3b4da1b4e99e1153046b1b00ae0b3338d42' ;; \
-		arm64) goRelArch='linux-arm64'; goRelSha256='a5c59e3f0aeaf6e939790152a8bfabb91d70c9787afb7aee06aef9bd4411c551' ;; \
-		i386) goRelArch='linux-386'; goRelSha256='1a63e97b6f1a673966d6a4f4f7f9c724fdd68bdeac11425bf8a39c7a24ddc0a7' ;; \
-		ppc64el) goRelArch='linux-ppc64le'; goRelSha256='bee55510a87bd366381df0be4736fd5cc89523228f9ca20eb1687f59e80ca029' ;; \
-		s390x) goRelArch='linux-s390x'; goRelSha256='6c370800d470ae116a9521f5439b3fa6271f06a6d4c2a18913c8c6226d78fe4b' ;; \
 		*) goRelArch='src'; goRelSha256='5fb43171046cf8784325e67913d55f88a683435071eef8e9da1aa8a1588fcf5d'; \
 			echo >&2; echo >&2 "warning: current architecture ($dpkgArch) does not have a corresponding Go binary release; will be building from source"; echo >&2 ;; \
 	esac; \
@@ -45,7 +49,9 @@ RUN set -eux; \
 		[ -n "$GOOS" ]; \
 		[ -n "$GOARCH" ]; \
 		( \
-			cd /usr/local/go/src; \
+			cd /usr/local/go; \
+			patch -p0 < /golang-ppc64-linker.patch; \
+			cd src; \
 			./make.bash; \
 		); \
 		\
@@ -72,7 +78,52 @@ RUN set -eux; \
 	\
 	go version
 
+# cleanup cross-built go
+RUN . /bin/arch-map \
+ && export GOHOSTARCH=$(go env GOHOSTARCH) \
+ && if [ "$GOARCH" != "$GOHOSTARCH" ]; then \
+ 	    mv /usr/local/go/bin/*_${GOARCH}/* /usr/local/go/bin/ \
+	 && rm -rf /usr/local/go/bin/*_${GOARCH} \
+	 && find /usr/local/go -iname \*_${GOHOSTARCH} | xargs rm -rf \
+  ; fi
+
 ENV GOPATH /go
 ENV PATH $GOPATH/bin:$PATH
 RUN mkdir -p "$GOPATH/src" "$GOPATH/bin" && chmod -R 777 "$GOPATH"
+WORKDIR $GOPATH
+
+################################################
+FROM paleozogt/debian:sid-$ARCH as release
+
+# copied from buildpack-deps:buster-scm dockerfile
+RUN apt-get update && apt-get install -y --no-install-recommends \
+		ca-certificates \
+		curl \
+		netbase \
+		wget \
+ && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+		git \
+		mercurial \
+		openssh-client \
+		subversion \
+		procps \
+ && rm -rf /var/lib/apt/lists/*
+
+# copied from first build stage
+RUN apt-get update && apt-get install -y --no-install-recommends \
+		g++ \
+		gcc \
+		libc6-dev \
+		make \
+		pkg-config \
+	&& rm -rf /var/lib/apt/lists/*
+
+# first stage build artifacts
+COPY --from=builder /usr/local/go /usr/local/go/
+COPY --from=builder /go /go
+
+ENV GOPATH /go
+ENV PATH /usr/local/go/bin:$PATH
+ENV PATH $GOPATH/bin:$PATH
 WORKDIR $GOPATH
