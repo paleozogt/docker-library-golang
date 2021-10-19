@@ -3,8 +3,13 @@
 #
 # PLEASE DO NOT EDIT IT DIRECTLY.
 #
+ARG ARCH
+FROM paleozogt/arch-map as archmap
+FROM buildpack-deps:buster-scm as builder
+ARG ARCH
 
-FROM buildpack-deps:buster-scm
+# arch map
+COPY --from=archmap /bin/arch-map /bin/
 
 # gcc for cgo
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -12,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 		gcc \
 		libc6-dev \
 		make \
+		patch \
 		pkg-config \
 	&& rm -rf /var/lib/apt/lists/*
 
@@ -19,40 +25,13 @@ ENV PATH /usr/local/go/bin:$PATH
 
 ENV GOLANG_VERSION 1.14.15
 
-RUN set -eux; \
+ADD *.patch /
+
+RUN . /bin/arch-map; \
+	set -eux; \
 	\
 	dpkgArch="$(dpkg --print-architecture)"; \
 	case "${dpkgArch##*-}" in \
-		'amd64') \
-			arch='linux-amd64'; \
-			url='https://storage.googleapis.com/golang/go1.14.15.linux-amd64.tar.gz'; \
-			sha256='c64a57b374a81f7cf1408d2c410a28c6f142414f1ffa9d1062de1d653b0ae0d6'; \
-			;; \
-		'armhf') \
-			arch='linux-armv6l'; \
-			url='https://storage.googleapis.com/golang/go1.14.15.linux-armv6l.tar.gz'; \
-			sha256='a63960d9b9c14954e299ffe060c0574ffb91ab810837da5941853b664d0652da'; \
-			;; \
-		'arm64') \
-			arch='linux-arm64'; \
-			url='https://storage.googleapis.com/golang/go1.14.15.linux-arm64.tar.gz'; \
-			sha256='4d964166a189c22032521c63935437c304bb7f01673b196898cff525897a1c27'; \
-			;; \
-		'i386') \
-			arch='linux-386'; \
-			url='https://storage.googleapis.com/golang/go1.14.15.linux-386.tar.gz'; \
-			sha256='cab962eaf954378bbb5b24f703baf3b471e9690a109082dd688593fbb6f9008e'; \
-			;; \
-		'ppc64el') \
-			arch='linux-ppc64le'; \
-			url='https://storage.googleapis.com/golang/go1.14.15.linux-ppc64le.tar.gz'; \
-			sha256='64d82004270bcd00948dbed9f1a123ef844ceb7633e6a87a5ca7ef8bdf59cfc1'; \
-			;; \
-		's390x') \
-			arch='linux-s390x'; \
-			url='https://storage.googleapis.com/golang/go1.14.15.linux-s390x.tar.gz'; \
-			sha256='8e121c947ec531628d37ad0292623f22c8f9fecac6067192b5cce34b36cedd79'; \
-			;; \
 		*) \
 # https://github.com/golang/go/issues/38536#issuecomment-616897960
 			arch='src'; \
@@ -71,7 +50,7 @@ RUN set -eux; \
 # https://github.com/golang/go/issues/14739#issuecomment-324767697
 	export GNUPGHOME="$(mktemp -d)"; \
 # https://www.google.com/linuxrepositories/
-	gpg --batch --keyserver ha.pool.sks-keyservers.net --recv-keys 'EB4C 1BFD 4F04 2F6D DDCC EC91 7721 F63B D38B 4796'; \
+	gpg --batch --keyserver keyserver.ubuntu.com --recv-keys 'EB4C 1BFD 4F04 2F6D DDCC EC91 7721 F63B D38B 4796'; \
 	gpg --batch --verify go.tgz.asc go.tgz; \
 	gpgconf --kill all; \
 	rm -rf "$GNUPGHOME" go.tgz.asc; \
@@ -89,7 +68,9 @@ RUN set -eux; \
 		[ -n "$GOOS" ]; \
 		[ -n "$GOARCH" ]; \
 		( \
-			cd /usr/local/go/src; \
+			cd /usr/local/go; \
+			patch -p0 < /golang-1.14-ppc64-linker.patch; \
+			cd src; \
 			./make.bash; \
 		); \
 		\
@@ -116,7 +97,52 @@ RUN set -eux; \
 	\
 	go version
 
+# cleanup cross-built go
+RUN . /bin/arch-map \
+ && export GOHOSTARCH=$(go env GOHOSTARCH) \
+ && if [ "$GOARCH" != "$GOHOSTARCH" ]; then \
+ 	    mv /usr/local/go/bin/*_${GOARCH}/* /usr/local/go/bin/ \
+	 && rm -rf /usr/local/go/bin/*_${GOARCH} \
+	 && find /usr/local/go -iname \*_${GOHOSTARCH} | xargs rm -rf \
+  ; fi
+
 ENV GOPATH /go
 ENV PATH $GOPATH/bin:$PATH
 RUN mkdir -p "$GOPATH/src" "$GOPATH/bin" && chmod -R 777 "$GOPATH"
+WORKDIR $GOPATH
+
+################################################
+FROM paleozogt/debian:sid-$ARCH as release
+
+# copied from buildpack-deps:buster-scm dockerfile
+RUN apt-get update && apt-get install -y --no-install-recommends \
+		ca-certificates \
+		curl \
+		netbase \
+		wget \
+ && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+		git \
+		mercurial \
+		openssh-client \
+		subversion \
+		procps \
+ && rm -rf /var/lib/apt/lists/*
+
+# copied from first build stage
+RUN apt-get update && apt-get install -y --no-install-recommends \
+		g++ \
+		gcc \
+		libc6-dev \
+		make \
+		pkg-config \
+	&& rm -rf /var/lib/apt/lists/*
+
+# first stage build artifacts
+COPY --from=builder /usr/local/go /usr/local/go/
+COPY --from=builder /go /go
+
+ENV GOPATH /go
+ENV PATH /usr/local/go/bin:$PATH
+ENV PATH $GOPATH/bin:$PATH
 WORKDIR $GOPATH
