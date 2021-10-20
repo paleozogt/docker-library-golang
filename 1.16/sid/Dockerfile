@@ -4,7 +4,13 @@
 # PLEASE DO NOT EDIT IT DIRECTLY.
 #
 
-FROM buildpack-deps:buster-scm
+ARG ARCH
+FROM paleozogt/arch-map as archmap
+FROM buildpack-deps:buster-scm as builder
+ARG ARCH
+
+# arch map
+COPY --from=archmap /bin/arch-map /bin/
 
 # install cgo-related dependencies
 RUN set -eux; \
@@ -14,6 +20,7 @@ RUN set -eux; \
 		gcc \
 		libc6-dev \
 		make \
+		patch \
 		pkg-config \
 	; \
 	rm -rf /var/lib/apt/lists/*
@@ -21,42 +28,17 @@ RUN set -eux; \
 ENV PATH /usr/local/go/bin:$PATH
 
 ENV GOLANG_VERSION 1.16.8
+ENV CGO_ENABLED=0
 
-RUN set -eux; \
+ADD *.patch /
+
+RUN . /bin/arch-map; \
+    set -eux; \
 	arch="$(dpkg --print-architecture)"; arch="${arch##*-}"; \
 	url=; \
 	case "$arch" in \
-		'amd64') \
-			url='https://dl.google.com/go/go1.16.8.linux-amd64.tar.gz'; \
-			sha256='f32501aeb8b7b723bc7215f6c373abb6981bbc7e1c7b44e9f07317e1a300dce2'; \
-			;; \
-		'armel') \
-			export GOARCH='arm' GOARM='5' GOOS='linux'; \
-			;; \
-		'armhf') \
-			url='https://dl.google.com/go/go1.16.8.linux-armv6l.tar.gz'; \
-			sha256='9c03d32e6b9622de4f4ce6e46bc1b7f8c738389ab70e1270282f488cd89079ee'; \
-			;; \
-		'arm64') \
-			url='https://dl.google.com/go/go1.16.8.linux-arm64.tar.gz'; \
-			sha256='430dbe185417204f6788913197ab3b189b6deae9c9b524f262858e53dab239c2'; \
-			;; \
-		'i386') \
-			url='https://dl.google.com/go/go1.16.8.linux-386.tar.gz'; \
-			sha256='ae5efe038fdc5d9f5bcef82389af8d070c3e753dc3ba3711d9368a9d5f9c957f'; \
-			;; \
-		'mips64el') \
-			export GOARCH='mips64le' GOOS='linux'; \
-			;; \
-		'ppc64el') \
-			url='https://dl.google.com/go/go1.16.8.linux-ppc64le.tar.gz'; \
-			sha256='ab379b6c87e2940a54f63f1a55b4ad2fad486e5d804fa8a6d8b595e8dd6ccb8c'; \
-			;; \
-		's390x') \
-			url='https://dl.google.com/go/go1.16.8.linux-s390x.tar.gz'; \
-			sha256='d311d0637b49c0debb34efb229ab0272f26709bc64e27fda2c3470a55426f980'; \
-			;; \
-		*) echo >&2 "error: unsupported architecture '$arch' (likely packaging update needed)"; exit 1 ;; \
+		*) export GOOS='linux'; \
+		   ;; \
 	esac; \
 	build=; \
 	if [ -z "$url" ]; then \
@@ -90,7 +72,9 @@ RUN set -eux; \
 		apt-get install -y --no-install-recommends golang-go; \
 		\
 		( \
-			cd /usr/local/go/src; \
+			cd /usr/local/go; \
+			patch -p1 < /golang-1.16-ppc64-linker.patch; \
+			cd src; \
 # set GOROOT_BOOTSTRAP + GOHOST* such that we can build Go successfully
 			export GOROOT_BOOTSTRAP="$(go env GOROOT)" GOHOSTOS="$GOOS" GOHOSTARCH="$GOARCH"; \
 			./make.bash; \
@@ -119,7 +103,52 @@ RUN set -eux; \
 	\
 	go version
 
+# cleanup cross-built go
+RUN . /bin/arch-map \
+ && export GOHOSTARCH=$(go env GOHOSTARCH) \
+ && if [ "$GOARCH" != "$GOHOSTARCH" ]; then \
+ 	    mv /usr/local/go/bin/*_${GOARCH}/* /usr/local/go/bin/ \
+	 && rm -rf /usr/local/go/bin/*_${GOARCH} \
+	 && find /usr/local/go -iname \*_${GOHOSTARCH} | xargs rm -rf \
+  ; fi
+
 ENV GOPATH /go
 ENV PATH $GOPATH/bin:$PATH
 RUN mkdir -p "$GOPATH/src" "$GOPATH/bin" && chmod -R 777 "$GOPATH"
+WORKDIR $GOPATH
+
+################################################
+FROM paleozogt/debian:sid-$ARCH as release
+
+# copied from buildpack-deps:buster-scm dockerfile
+RUN apt-get update && apt-get install -y --no-install-recommends \
+		ca-certificates \
+		curl \
+		netbase \
+		wget \
+ && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+		git \
+		mercurial \
+		openssh-client \
+		subversion \
+		procps \
+ && rm -rf /var/lib/apt/lists/*
+
+# copied from first build stage
+RUN apt-get update && apt-get install -y --no-install-recommends \
+		g++ \
+		gcc \
+		libc6-dev \
+		make \
+		pkg-config \
+	&& rm -rf /var/lib/apt/lists/*
+
+# first stage build artifacts
+COPY --from=builder /usr/local/go /usr/local/go/
+COPY --from=builder /go /go
+
+ENV GOPATH /go
+ENV PATH /usr/local/go/bin:$PATH
+ENV PATH $GOPATH/bin:$PATH
 WORKDIR $GOPATH
