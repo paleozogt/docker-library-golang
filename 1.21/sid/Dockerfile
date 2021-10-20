@@ -4,51 +4,54 @@
 # PLEASE DO NOT EDIT IT DIRECTLY.
 #
 
-FROM buildpack-deps:bookworm-scm AS build
+ARG ARCH
+ARG DEPLOY_IMAGE=paleozogt/debian:sid-20240803-$ARCH
+FROM paleozogt/arch-map as archmap
+FROM buildpack-deps:bookworm-scm as build
+ARG ARCH
+
+# arch map
+COPY --from=archmap /bin/arch-map /bin/
+
+# install cgo-related dependencies
+RUN set -eux; \
+	apt-get update; \
+	apt-get install -y --no-install-recommends \
+		g++ \
+		gcc \
+		libc6-dev \
+		make \
+		patch \
+		pkg-config \
+	; \
+	rm -rf /var/lib/apt/lists/*
 
 ENV PATH /usr/local/go/bin:$PATH
 
 ENV GOLANG_VERSION 1.21.13
+ENV CGO_ENABLED=0
 
-RUN set -eux; \
+ADD *.patch /
+
+RUN . /bin/arch-map; \
+    set -eux; \
 	now="$(date '+%s')"; \
 	arch="$(dpkg --print-architecture)"; arch="${arch##*-}"; \
 	url=; \
 	case "$arch" in \
-		'amd64') \
-			url='https://dl.google.com/go/go1.21.13.linux-amd64.tar.gz'; \
-			sha256='502fc16d5910562461e6a6631fb6377de2322aad7304bf2bcd23500ba9dab4a7'; \
-			;; \
-		'armhf') \
-			url='https://dl.google.com/go/go1.21.13.linux-armv6l.tar.gz'; \
-			sha256='7f360ac69fc7f53cbe849680a7cb508524b9f225c532d9d888a0583c7903750b'; \
-			;; \
-		'arm64') \
-			url='https://dl.google.com/go/go1.21.13.linux-arm64.tar.gz'; \
-			sha256='2ca2d70dc9c84feef959eb31f2a5aac33eefd8c97fe48f1548886d737bffabd4'; \
-			;; \
-		'i386') \
-			url='https://dl.google.com/go/go1.21.13.linux-386.tar.gz'; \
-			sha256='21652cea6ef24f6a87f2911af338dbc6ecac5b05fc2f8235137cf486244fcb42'; \
-			;; \
-		'mips64el') \
-			url='https://dl.google.com/go/go1.21.13.linux-mips64le.tar.gz'; \
-			sha256='653a3a3ded540bfb2c67c3712ea8ecd56ca83b43358961b3b121f73657934e03'; \
-			;; \
-		'ppc64el') \
-			url='https://dl.google.com/go/go1.21.13.linux-ppc64le.tar.gz'; \
-			sha256='d204271ad29f74184ac04fa62407d70de4003070441bc6146d217035320c47ed'; \
-			;; \
-		'riscv64') \
-			url='https://dl.google.com/go/go1.21.13.linux-riscv64.tar.gz'; \
-			sha256='3aa7e83ab4aeba6d6ef98d3df965f176ccb148fcefc6eacfd80831ada842fa9a'; \
-			;; \
-		's390x') \
-			url='https://dl.google.com/go/go1.21.13.linux-s390x.tar.gz'; \
-			sha256='f0a40e4596f919422cb8c6695565c67161835343e09d6b0ddc9ba54f9ce1916b'; \
-			;; \
-		*) echo >&2 "error: unsupported architecture '$arch' (likely packaging update needed)"; exit 1 ;; \
+		*) export GOOS='linux'; \
+		   ;; \
 	esac; \
+	build=; \
+	if [ -z "$url" ]; then \
+# https://github.com/golang/go/issues/38536#issuecomment-616897960
+		build=1; \
+		url='https://dl.google.com/go/go1.21.13.src.tar.gz'; \
+		sha256='71fb31606a1de48d129d591e8717a63e0c5565ffba09a24ea9f899a13214c34d'; \
+		echo >&2; \
+		echo >&2 "warning: current architecture ($arch) does not have a compatible Go binary release; will be building from source"; \
+		echo >&2; \
+	fi; \
 	\
 	wget -O go.tgz.asc "$url.asc"; \
 	wget -O go.tgz "$url" --progress=dot:giga; \
@@ -76,6 +79,48 @@ RUN set -eux; \
 # sanity check (detected value should be older than our wall clock)
 	[ "$SOURCE_DATE_EPOCH" -lt "$now" ]; \
 	\
+	if [ -n "$build" ]; then \
+		savedAptMark="$(apt-mark showmanual)"; \
+		apt-get update; \
+		apt-get install -y --no-install-recommends golang-go; \
+# cgo-related deps (for 1.21+, we should instead use CGO_ENABLED=0; https://github.com/golang/go/blob/b44f6378233ada888f0dc79e0ac56def4673d9ed/src/cmd/dist/build.go#L1312 / https://github.com/golang/go/commit/da0c375c571037ec5ea6f8ef2be8f07593b40eb6)
+		apt-get install -y --no-install-recommends gcc libc6-dev; \
+		\
+		export GOCACHE='/tmp/gocache'; \
+		\
+		( \
+			cd /usr/local/go; \
+			patch -p1 < /golang-1.21-ppc64-linker.patch; \
+			cd src; \
+# set GOROOT_BOOTSTRAP + GOHOST* such that we can build Go successfully
+			export GOROOT_BOOTSTRAP="$(go env GOROOT)" GOHOSTOS="$GOOS" GOHOSTARCH="$GOARCH"; \
+			./make.bash; \
+		); \
+		\
+		apt-mark auto '.*' > /dev/null; \
+		apt-mark manual $savedAptMark > /dev/null; \
+		apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
+		rm -rf /var/lib/apt/lists/*; \
+		\
+# remove a few intermediate / bootstrapping files the official binary release tarballs do not contain
+		rm -rf \
+			/usr/local/go/pkg/*/cmd \
+			/usr/local/go/pkg/bootstrap \
+			/usr/local/go/pkg/obj \
+			/usr/local/go/pkg/tool/*/api \
+			/usr/local/go/pkg/tool/*/go_bootstrap \
+			/usr/local/go/src/cmd/dist/dist \
+			"$GOCACHE" \
+		; \
+		\
+# clamp timestamps for reproducibility (allows "COPY --link" to be more clever/useful)
+		date="$(date -d "@$SOURCE_DATE_EPOCH" '+%Y%m%d%H%M.%S')"; \
+		touch -t "$date" /usr/local/.go-date-stamp; \
+		find /usr/local/go -depth -newer /usr/local/.go-date-stamp -exec touch -ht "$date" '{}' +; \
+		rm /usr/local/.go-date-stamp; \
+		touch -t "$date" /usr/local; \
+	fi; \
+	\
 	if [ "$arch" = 'armhf' ]; then \
 		[ -s /usr/local/go/go.env ]; \
 		before="$(go env GOARM)"; [ "$before" != '7' ]; \
@@ -102,7 +147,21 @@ RUN set -eux; \
 	[ "$SOURCE_DATE_EPOCH" = "$epoch" ]; \
 	find /target -newer /target/usr/local/go -exec sh -c 'ls -ld "$@" && exit "$#"' -- '{}' +
 
-FROM buildpack-deps:bookworm-scm
+# cleanup cross-built go
+RUN . /bin/arch-map \
+ && export GOHOSTARCH=$(go env GOHOSTARCH) \
+ && if [ "$GOARCH" != "$GOHOSTARCH" ]; then \
+ 	    mv /usr/local/go/bin/*_${GOARCH}/* /usr/local/go/bin/ \
+	 && rm -rf /usr/local/go/bin/*_${GOARCH} \
+	 && find /usr/local/go -iname \*_${GOHOSTARCH} | xargs rm -rf \
+  ; fi
+
+ENV GOPATH /go
+ENV PATH $GOPATH/bin:$PATH
+RUN mkdir -p "$GOPATH/src" "$GOPATH/bin" && chmod -R 777 "$GOPATH"
+WORKDIR $GOPATH
+
+FROM $DEPLOY_IMAGE as release
 
 # install cgo-related dependencies
 RUN set -eux; \
