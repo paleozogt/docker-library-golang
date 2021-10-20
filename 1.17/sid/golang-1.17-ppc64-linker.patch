@@ -1,0 +1,55 @@
+commit 6395f9f8621d9bd5419a290486455254d7c57609
+Author: Aaron Simmons <paleozogt@gmail.com>
+Date:   Mon Oct 18 17:20:28 2021 -0600
+
+    external linking support for ppc64 (inspired by https://git.powerel.org/powerel7/base/src/commit/abe20f1f4bd208ff52307f8845461b1dd3de2277/SOURCES/golang-1.14-ppc64-linker.patch)
+
+diff --git a/src/cmd/link/internal/ld/config.go b/src/cmd/link/internal/ld/config.go
+index 20f1d0b8c1..efe247f730 100644
+--- a/src/cmd/link/internal/ld/config.go
++++ b/src/cmd/link/internal/ld/config.go
+@@ -74,7 +74,7 @@ func (mode *BuildMode) Set(s string) error {
+ 		*mode = BuildModeCArchive
+ 	case "c-shared":
+ 		switch buildcfg.GOARCH {
+-		case "386", "amd64", "arm", "arm64", "ppc64le", "s390x":
++		case "386", "amd64", "arm", "arm64", "ppc64", "ppc64le", "s390x":
+ 		default:
+ 			return badmode()
+ 		}
+@@ -83,7 +83,7 @@ func (mode *BuildMode) Set(s string) error {
+ 		switch buildcfg.GOOS {
+ 		case "linux":
+ 			switch buildcfg.GOARCH {
+-			case "386", "amd64", "arm", "arm64", "ppc64le", "s390x":
++			case "386", "amd64", "arm", "arm64", "ppc64", "ppc64le", "s390x":
+ 			default:
+ 				return badmode()
+ 			}
+@@ -95,7 +95,7 @@ func (mode *BuildMode) Set(s string) error {
+ 		switch buildcfg.GOOS {
+ 		case "linux":
+ 			switch buildcfg.GOARCH {
+-			case "386", "amd64", "arm", "arm64", "s390x", "ppc64le":
++			case "386", "amd64", "arm", "arm64", "s390x", "ppc64", "ppc64le":
+ 			default:
+ 				return badmode()
+ 			}
+@@ -196,7 +196,7 @@ func mustLinkExternal(ctxt *Link) (res bool, reason string) {
+ 	// Internally linking cgo is incomplete on some architectures.
+ 	// https://golang.org/issue/14449
+ 	// https://golang.org/issue/21961
+-	if iscgo && ctxt.Arch.InFamily(sys.MIPS64, sys.MIPS, sys.PPC64, sys.RISCV64) {
++	if iscgo && ctxt.Arch.InFamily(sys.MIPS64, sys.MIPS, sys.RISCV64) {
+ 		return true, buildcfg.GOARCH + " does not support internal cgo"
+ 	}
+ 	if iscgo && (buildcfg.GOOS == "android" || buildcfg.GOOS == "dragonfly") {
+@@ -285,8 +285,6 @@ func determineLinkMode(ctxt *Link) {
+ 		}
+ 	case LinkExternal:
+ 		switch {
+-		case buildcfg.GOARCH == "ppc64" && buildcfg.GOOS != "aix":
+-			Exitf("external linking not supported for %s/ppc64", buildcfg.GOOS)
+ 		}
+ 	}
+ }
